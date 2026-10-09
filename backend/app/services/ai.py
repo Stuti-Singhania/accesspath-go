@@ -28,6 +28,30 @@ _AVOID_STAIRS = re.compile(r"\b(?:avoid|without|no)\s+(?:any\s+)?stairs?\b|\bsta
 _AVOID_SLOPE = re.compile(r"\b(?:avoid|without|no)\b[^.!?;\n]{0,60}\bsteep\s+(?:slopes?|hills?)\b", re.IGNORECASE)
 _PREFER_RAMPS = re.compile(r"\bprefer\s+(?:a\s+)?ramps?\b", re.IGNORECASE)
 _AVOID_UNPAVED = re.compile(r"\b(?:avoid|without|no)\s+unpaved(?:\s+(?:surfaces?|paths?))?\b", re.IGNORECASE)
+_AVOID_UNPAVED_LIST = re.compile(
+    r"\bavoid\b[^.!?;\n]{0,120}\bunpaved(?:\s+(?:surfaces?|paths?))?\b",
+    re.IGNORECASE,
+)
+_PREFER_PAVED = re.compile(
+    r"\b(?:prefer|want|use|stick to|only)\s+(?:a\s+)?paved(?:\s+(?:surfaces?|paths?))?\b"
+    r"|\bpaved\s+(?:surfaces?|paths?)\b",
+    re.IGNORECASE,
+)
+_UNPAVED_OKAY = re.compile(
+    r"\b(?:unpaved|gravel|dirt)\s+(?:surfaces?|paths?)\s+(?:are\s+)?(?:okay|fine|acceptable)\b"
+    r"|\bprefer\s+unpaved\b",
+    re.IGNORECASE,
+)
+_STAIRS_OKAY = re.compile(r"\bstairs?\s+(?:are\s+)?(?:okay|fine|acceptable|allowed)\b", re.IGNORECASE)
+_SLOPES_OKAY = re.compile(
+    r"\b(?:steep\s+slopes?|hills?)\s+(?:are\s+)?(?:okay|fine|acceptable|allowed)\b", re.IGNORECASE
+)
+_RAMPS_NOT_PREFERRED = re.compile(r"\b(?:do not|don't|no need to)\s+(?:prefer|use|need)\s+ramps?\b", re.IGNORECASE)
+_MAX_SLOPE = re.compile(
+    r"\b(?:max(?:imum)?\s+slope(?:\s+of)?|slope\s+limit(?:\s+of)?|no more than)\s*(\d+(?:\.\d+)?)\s*%?"
+    r"|\b(\d+(?:\.\d+)?)\s*%\s*(?:max(?:imum)?\s+)?slope\b",
+    re.IGNORECASE,
+)
 
 
 def _duration_minutes(text: str) -> int | None:
@@ -40,33 +64,75 @@ def _duration_minutes(text: str) -> int | None:
     return max(5, min(minutes, 240))
 
 
+def _explicitly_avoids_unpaved(text: str) -> bool:
+    return bool(_AVOID_UNPAVED.search(text) or _AVOID_UNPAVED_LIST.search(text))
+
+
+def explicit_preference_fields(text: str) -> list[str]:
+    """Return preference field names explicitly supported by deterministic text matching."""
+    explicit: set[str] = set()
+    if _WHEELCHAIR.search(text) or _WALKER.search(text) or _CANE.search(text):
+        explicit.add("mobility_mode")
+    if _AVOID_STAIRS.search(text) or _STAIRS_OKAY.search(text):
+        explicit.add("avoid_stairs")
+    if _AVOID_SLOPE.search(text) or _SLOPES_OKAY.search(text):
+        explicit.add("avoid_steep_slopes")
+    if _PREFER_RAMPS.search(text) or _RAMPS_NOT_PREFERRED.search(text):
+        explicit.add("prefer_ramps")
+    if _explicitly_avoids_unpaved(text) or _PREFER_PAVED.search(text) or _UNPAVED_OKAY.search(text):
+        explicit.add("avoid_unpaved")
+    if _MAX_SLOPE.search(text):
+        explicit.add("max_slope")
+    if _duration_minutes(text) is not None:
+        explicit.add("target_duration_minutes")
+    return [field for field in WalkPreferences.model_fields if field in explicit]
+
+
 def normalize_preferences(preferences: WalkPreferences, text: str) -> WalkPreferences:
     """Combine validated model fields with stable mobility defaults and explicit user constraints."""
     values = preferences.model_dump()
-    wheelchair = preferences.mobility_mode == "wheelchair" or bool(_WHEELCHAIR.search(text))
+    explicit_mode = (
+        "wheelchair" if _WHEELCHAIR.search(text) else
+        "walker" if _WALKER.search(text) else
+        "cane" if _CANE.search(text) else None
+    )
+    if explicit_mode:
+        values["mobility_mode"] = explicit_mode
+    wheelchair = values["mobility_mode"] == "wheelchair"
     if wheelchair:
         values.update(
             mobility_mode="wheelchair",
             avoid_stairs=True,
             prefer_ramps=True,
             avoid_steep_slopes=True,
-            avoid_unpaved=True,
             max_slope=5,
         )
-    elif preferences.mobility_mode == "none":
-        if _WALKER.search(text):
-            values["mobility_mode"] = "walker"
-        elif _CANE.search(text):
-            values["mobility_mode"] = "cane"
-
     if _AVOID_STAIRS.search(text):
         values["avoid_stairs"] = True
+    elif _STAIRS_OKAY.search(text):
+        values["avoid_stairs"] = False
     if _AVOID_SLOPE.search(text):
         values["avoid_steep_slopes"] = True
+    elif _SLOPES_OKAY.search(text):
+        values["avoid_steep_slopes"] = False
     if _PREFER_RAMPS.search(text):
         values["prefer_ramps"] = True
-    if _AVOID_UNPAVED.search(text):
+    elif _RAMPS_NOT_PREFERRED.search(text):
+        values["prefer_ramps"] = False
+
+    # This field is never inferred from Gemma: an explicit request enables it,
+    # while no mention always leaves the optional restriction disabled.
+    if _explicitly_avoids_unpaved(text) or _PREFER_PAVED.search(text):
         values["avoid_unpaved"] = True
+    elif _UNPAVED_OKAY.search(text):
+        values["avoid_unpaved"] = False
+    else:
+        values["avoid_unpaved"] = False
+
+    slope_match = _MAX_SLOPE.search(text)
+    if slope_match:
+        explicit_slope = float(slope_match.group(1) or slope_match.group(2))
+        values["max_slope"] = max(0.0, min(30.0, explicit_slope))
 
     explicit_duration = _duration_minutes(text)
     if explicit_duration is not None:

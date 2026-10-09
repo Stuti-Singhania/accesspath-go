@@ -1,8 +1,16 @@
-import type { Barrier, BarrierAnalysis, Preferences, RouteResponse, RouteSummary } from "@/types";
+import type {
+  Barrier,
+  BarrierAnalysis,
+  PreferenceField,
+  PreferenceResponse,
+  Preferences,
+  RouteResponse,
+  RouteSummary,
+} from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
-function validatePreferencesResponse(value: unknown): { preferences: Preferences; source: string; fallback_reason: string | null } {
+function validatePreferencesResponse(value: unknown): PreferenceResponse {
   if (!value || typeof value !== "object") throw new Error("The API returned an invalid preference response.");
   const result = value as Record<string, unknown>;
   const preferences = result.preferences as Record<string, unknown> | undefined;
@@ -16,7 +24,16 @@ function validatePreferencesResponse(value: unknown): { preferences: Preferences
       !(result.fallback_reason === null || typeof result.fallback_reason === "string")) {
     throw new Error("The API returned incomplete preferences. Please try again.");
   }
-  return result as unknown as { preferences: Preferences; source: string; fallback_reason: string | null };
+  const fields = [
+    "mobility_mode", "avoid_stairs", "prefer_ramps", "avoid_steep_slopes", "avoid_unpaved",
+    "max_slope", "target_duration_minutes",
+  ];
+  const validMetadata = (value: unknown): value is PreferenceField[] =>
+    Array.isArray(value) && value.every((field) => typeof field === "string" && fields.includes(field));
+  if (!validMetadata(result.explicit_fields) || !validMetadata(result.suggested_fields)) {
+    throw new Error("The API returned incomplete preference metadata. Please try again.");
+  }
+  return result as unknown as PreferenceResponse;
 }
 
 function validateRouteResponse(value: unknown): RouteResponse {

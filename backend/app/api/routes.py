@@ -14,8 +14,14 @@ from app.schemas.accessibility import (
     ReportCreate,
     ReportRead,
     RouteRequest,
+    WalkPreferences,
 )
-from app.services.ai import LocalAIUnavailable, analyze_image, extract_preferences
+from app.services.ai import (
+    LocalAIUnavailable,
+    analyze_image,
+    explicit_preference_fields,
+    extract_preferences,
+)
 from app.services.routing import RoutingUnavailable, build_routes
 
 router = APIRouter(prefix="/api")
@@ -73,7 +79,16 @@ def _image_dimensions(contents: bytes, content_type: str) -> tuple[int, int] | N
 @router.post("/preferences")
 async def preferences(body: PreferenceRequest, settings: Annotated[Settings, Depends(get_settings)]):
     extracted, source, fallback_reason = await extract_preferences(settings, body.text)
-    return {"preferences": extracted, "source": source, "fallback_reason": fallback_reason}
+    explicit_fields = explicit_preference_fields(body.text)
+    all_fields = list(WalkPreferences.model_fields)
+    suggested_fields = [field for field in all_fields if field not in explicit_fields]
+    return {
+        "preferences": extracted,
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "explicit_fields": explicit_fields,
+        "suggested_fields": suggested_fields,
+    }
 
 
 @router.post("/routes")

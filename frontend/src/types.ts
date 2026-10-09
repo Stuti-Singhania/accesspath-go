@@ -8,6 +8,15 @@ export type Preferences = {
   target_duration_minutes: number;
 };
 
+export type PreferenceField = keyof Preferences;
+export type PreferenceResponse = {
+  preferences: Preferences;
+  source: "ollama" | "local_fallback";
+  fallback_reason: string | null;
+  explicit_fields: PreferenceField[];
+  suggested_fields: PreferenceField[];
+};
+
 export type Barrier = {
   id: number;
   latitude: number;

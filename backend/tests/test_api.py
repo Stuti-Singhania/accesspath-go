@@ -82,13 +82,15 @@ def test_normalization_preserves_wheelchair_defaults_and_explicit_requirements()
     result = ai.normalize_preferences(WalkPreferences.model_validate(WHEELCHAIR_RESPONSE), text)
     assert result.model_dump() == {
         "mobility_mode": "wheelchair", "avoid_stairs": True, "prefer_ramps": True,
-        "avoid_steep_slopes": True, "avoid_unpaved": True, "max_slope": 5.0,
+        "avoid_steep_slopes": True, "avoid_unpaved": False, "max_slope": 5.0,
         "target_duration_minutes": 25,
     }
+    explicit = ai.explicit_preference_fields(text)
+    assert explicit == ["mobility_mode", "avoid_stairs", "avoid_steep_slopes", "target_duration_minutes"]
 
 
 @pytest.mark.parametrize(("text", "expected"), [
-    ("Wheelchair-friendly walk", ("wheelchair", True, True, True, True, 5.0)),
+    ("Wheelchair-friendly walk", ("wheelchair", True, True, True, False, 5.0)),
     ("Walk for 25 minutes", ("none", False, False, False, False, 8.0)),
     ("25 min walk; avoid stairs and steep slopes", ("none", True, False, True, False, 8.0)),
     ("Prefer a ramp and avoid unpaved paths", ("none", False, True, False, True, 8.0)),
@@ -105,6 +107,61 @@ def test_keyword_fallback_recognizes_mobility_and_constraints(text, expected):
 ])
 def test_duration_extraction(text, expected_minutes):
     assert ai.conservative_preferences(text).target_duration_minutes == expected_minutes
+
+
+@pytest.mark.parametrize("text", ["Avoid unpaved paths", "Please avoid unpaved surfaces"])
+def test_explicit_unpaved_avoidance_is_enabled_and_marked_explicit(text):
+    result = ai.normalize_preferences(WalkPreferences(), text)
+    assert result.avoid_unpaved is True
+    assert "avoid_unpaved" in ai.explicit_preference_fields(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Avoid stairs, steep slopes, and unpaved paths.",
+    "Avoid stairs and steep slopes, and unpaved paths.",
+    "Avoid unpaved paths.",
+])
+def test_preference_api_marks_coordinated_unpaved_avoidance_as_explicit(client, monkeypatch, text):
+    async def model_defaults(*_args, **_kwargs):
+        return WalkPreferences().model_dump()
+
+    monkeypatch.setattr(ai, "_ollama", model_defaults)
+    response = client.post("/api/preferences", json={"text": text})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["preferences"]["avoid_unpaved"] is True
+    assert "avoid_unpaved" in data["explicit_fields"]
+    assert "avoid_unpaved" not in data["suggested_fields"]
+
+
+def test_explicit_preference_for_paved_paths_enables_unpaved_avoidance():
+    result = ai.normalize_preferences(WalkPreferences(), "I prefer paved paths")
+    assert result.avoid_unpaved is True
+    assert "avoid_unpaved" in ai.explicit_preference_fields("I prefer paved paths")
+
+
+def test_wheelchair_model_cannot_infer_unpaved_restriction():
+    model_result = WalkPreferences(mobility_mode="wheelchair", avoid_unpaved=True)
+    result = ai.normalize_preferences(model_result, "Wheelchair-friendly walk")
+    assert result.avoid_unpaved is False
+
+
+def test_explicit_mobility_mode_overrides_conflicting_model_value():
+    model_result = WalkPreferences(mobility_mode="wheelchair", avoid_unpaved=True)
+    result = ai.normalize_preferences(model_result, "I use a walker")
+    assert result.mobility_mode == "walker"
+    assert result.avoid_unpaved is False
+
+
+def test_explicit_stairs_slope_and_duration_requests_are_preserved():
+    text = "Wheelchair walk for 25 minutes; avoid stairs and steep slopes"
+    result = ai.normalize_preferences(WalkPreferences(), text)
+    assert result.avoid_stairs is True
+    assert result.avoid_steep_slopes is True
+    assert result.target_duration_minutes == 25
+    assert {"avoid_stairs", "avoid_steep_slopes", "target_duration_minutes"}.issubset(
+        ai.explicit_preference_fields(text)
+    )
 
 
 @pytest.mark.asyncio
@@ -132,6 +189,27 @@ async def test_malformed_ai_preferences_fall_back_without_exposing_raw_output(mo
     assert "secret raw model text" not in (reason or "")
     assert preferences.target_duration_minutes == 25
     assert preferences.mobility_mode == "wheelchair"
+    assert preferences.avoid_unpaved is False
+
+
+@pytest.mark.asyncio
+async def test_model_unpaved_inference_is_overridden_and_metadata_is_deterministic(client, monkeypatch):
+    async def inferred_unpaved(*_args, **_kwargs):
+        return {**WHEELCHAIR_RESPONSE, "avoid_unpaved": True}
+
+    monkeypatch.setattr(ai, "_ollama", inferred_unpaved)
+    response = client.post("/api/preferences", json={
+        "text": "I want a 25-minute wheelchair-friendly walk. Avoid stairs and steep slopes."
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["preferences"]["avoid_unpaved"] is False
+    assert data["explicit_fields"] == [
+        "mobility_mode", "avoid_stairs", "avoid_steep_slopes", "target_duration_minutes"
+    ]
+    assert "prefer_ramps" in data["suggested_fields"]
+    assert "max_slope" in data["suggested_fields"]
+    assert "avoid_unpaved" in data["suggested_fields"]
 
 
 @pytest.mark.asyncio
@@ -239,6 +317,9 @@ async def test_preference_endpoint_reports_source_without_returning_raw_output(c
     assert response.status_code == 200
     assert response.json()["source"] == "local_fallback"
     assert response.json()["preferences"]["target_duration_minutes"] == 25
+    assert response.json()["preferences"]["avoid_unpaved"] is False
+    assert response.json()["explicit_fields"] == ["mobility_mode", "target_duration_minutes"]
+    assert "avoid_unpaved" in response.json()["suggested_fields"]
     assert "untrusted" not in response.text
     assert response.json()["fallback_reason"]
 

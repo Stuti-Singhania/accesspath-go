@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import type { Barrier, BarrierAnalysis, PickMode, Preferences, RouteSummary } from "@/types";
+import type { Barrier, BarrierAnalysis, PickMode, PreferenceField, Preferences, RouteSummary } from "@/types";
 
 const RouteMap = dynamic(() => import("@/components/RouteMap"), {
   ssr: false,
@@ -11,19 +11,6 @@ const RouteMap = dynamic(() => import("@/components/RouteMap"), {
 });
 
 const EXAMPLE = "I want a 25-minute wheelchair-friendly walk. Avoid stairs and steep slopes.";
-const labels: Record<keyof Preferences, string> = {
-  mobility_mode: "Mobility mode", avoid_stairs: "Avoid stairs", prefer_ramps: "Prefer ramps",
-  avoid_steep_slopes: "Avoid steep slopes", avoid_unpaved: "Avoid unpaved surfaces",
-  max_slope: "Maximum slope", target_duration_minutes: "Target duration",
-};
-
-function describePreference(key: keyof Preferences, value: Preferences[keyof Preferences]) {
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (key === "max_slope") return `${value}%`;
-  if (key === "target_duration_minutes") return `${value} minutes`;
-  return String(value).replaceAll("_", " ");
-}
-
 function prettyDistance(meters: number) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
 }
@@ -31,6 +18,8 @@ function prettyDistance(meters: number) {
 export default function Home() {
   const [requestText, setRequestText] = useState(EXAMPLE);
   const [preferences, setPreferences] = useState<Preferences | null>(null);
+  const [explicitFields, setExplicitFields] = useState<PreferenceField[]>([]);
+  const [suggestedFields, setSuggestedFields] = useState<PreferenceField[]>([]);
   const [preferenceSource, setPreferenceSource] = useState("");
   const [preferenceFallbackReason, setPreferenceFallbackReason] = useState("");
   const [start, setStart] = useState<[number, number] | null>(null);
@@ -90,11 +79,22 @@ export default function Home() {
     );
   };
 
+  const updatePreference = <K extends keyof Preferences,>(key: K, value: Preferences[K]) => {
+    setPreferences((current) => current ? { ...current, [key]: value } : current);
+    setRoute(null);
+  };
+
+  const preferenceOrigin = (field: PreferenceField) =>
+    explicitFields.includes(field) ? "From your request" : "Suggested default";
+
   const extract = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy("preferences"); setMessage(""); setPreferences(null); setPreferenceFallbackReason(""); setRoute(null);
     try {
       const result = await api.preferences(requestText);
-      setPreferences(result.preferences); setPreferenceSource(result.source); setPreferenceFallbackReason(result.fallback_reason ?? "");
+      setPreferences(result.preferences);
+      setExplicitFields(result.explicit_fields);
+      setSuggestedFields(result.suggested_fields);
+      setPreferenceSource(result.source); setPreferenceFallbackReason(result.fallback_reason ?? "");
     } catch (error) { setMessage(error instanceof Error ? error.message : "Couldn't interpret the request."); }
     finally { setBusy(""); }
   };
@@ -166,7 +166,42 @@ export default function Home() {
             <textarea id="walk-request" value={requestText} onChange={(event) => setRequestText(event.target.value)} rows={3} maxLength={1000} placeholder="Describe the walk you have in mind…" />
             <div className="form-bottom"><span className="privacy-note"><span aria-hidden="true">◉</span> Your request stays on this device when local AI is available.</span><button className="button button-dark" type="submit" disabled={busy === "preferences"}>{busy === "preferences" ? "Reading your request…" : "Set my preferences"}<span aria-hidden="true">↗</span></button></div>
           </form>
-          {preferences && <div className="preferences-panel" aria-live="polite"><div className="panel-title"><span>✓</span><div><strong>Here’s what we heard</strong><small>{preferenceSource === "ollama" ? "Parsed with local Gemma" : "Handled by the local fallback parser"}</small></div></div><dl>{(Object.keys(labels) as (keyof Preferences)[]).map((key) => <div key={key}><dt>{labels[key]}</dt><dd>{describePreference(key, preferences[key])}</dd></div>)}</dl>{preferenceFallbackReason && <p className="fallback-note" role="status">{preferenceFallbackReason}</p>}</div>}
+          {preferences && <section className="preferences-panel" aria-labelledby="preferences-review-title">
+            <div className="panel-title"><span aria-hidden="true">✓</span><div>
+              <strong id="preferences-review-title">Here’s what we understood</strong>
+              <small>{preferenceSource === "ollama" ? "Parsed with local Gemma" : "Handled by the local fallback parser"}</small>
+            </div></div>
+            <h3>Review and adjust before finding your route</h3>
+            <p className="preference-hint">Suggestions are clearly marked and can be changed any time before routing.</p>
+            <div className="preference-controls">
+              <div className="preference-control">
+                <div className="preference-control-copy"><label htmlFor="preference-mobility">Mobility mode</label><small>{preferenceOrigin("mobility_mode")}</small></div>
+                <select id="preference-mobility" value={preferences.mobility_mode} onChange={(event) => updatePreference("mobility_mode", event.target.value as Preferences["mobility_mode"])}>
+                  <option value="wheelchair">Wheelchair</option><option value="walker">Walker</option><option value="cane">Cane</option><option value="none">None</option>
+                </select>
+              </div>
+              {([
+                ["avoid_stairs", "Avoid stairs"],
+                ["prefer_ramps", "Prefer ramps"],
+                ["avoid_steep_slopes", "Avoid steep slopes"],
+                ["avoid_unpaved", "Avoid unpaved surfaces"],
+              ] as const).map(([field, label]) => <label className="preference-check" key={field}>
+                <input type="checkbox" checked={preferences[field]} onChange={(event) => updatePreference(field, event.target.checked)} />
+                <span className="preference-check-copy"><strong>{label}</strong><small>{preferenceOrigin(field)}</small></span>
+              </label>)}
+              <div className="preference-control">
+                <div className="preference-control-copy"><label htmlFor="preference-slope">Maximum slope</label><small>{preferenceOrigin("max_slope")}</small></div>
+                <div className="number-with-unit"><input id="preference-slope" type="number" min="0" max="30" step="0.5" value={preferences.max_slope} onChange={(event) => { const value = Number(event.target.value); if (event.target.value !== "" && value >= 0 && value <= 30) updatePreference("max_slope", value); }} /><span>%</span></div>
+              </div>
+              <div className="preference-control">
+                <div className="preference-control-copy"><label htmlFor="preference-duration">Target duration</label><small>{preferenceOrigin("target_duration_minutes")}</small></div>
+                <div className="number-with-unit"><input id="preference-duration" type="number" min="5" max="240" step="1" value={preferences.target_duration_minutes} onChange={(event) => { const value = Number(event.target.value); if (event.target.value !== "" && Number.isInteger(value) && value >= 5 && value <= 240) updatePreference("target_duration_minutes", value); }} /><span>minutes</span></div>
+              </div>
+            </div>
+            {preferences.mobility_mode === "wheelchair" && !preferences.avoid_unpaved && <p className="unpaved-suggestion">For wheelchair comfort, you may prefer paved surfaces. This option stays off unless you choose it.</p>}
+            {suggestedFields.length > 0 && <p className="preference-hint">Suggested options reflect common defaults, not requirements. Change any of them to suit this walk.</p>}
+            {preferenceFallbackReason && <p className="fallback-note" role="status">{preferenceFallbackReason}</p>}
+          </section>}
         </section>
 
         <section className="step-section map-section" id="how-it-works" aria-labelledby="route-title">
