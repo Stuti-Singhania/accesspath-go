@@ -4,6 +4,8 @@ import { useEffect } from "react";
 import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import type { Barrier, PickMode, RouteSummary } from "@/types";
 
+const REPORT_MARKER_COLOR = "#754d9a";
+
 type Props = {
   mode: PickMode;
   start: [number, number] | null;
@@ -38,11 +40,11 @@ export default function RouteMap({ mode, start, destination, reportPoint, route,
       <Recenter point={focus} />
       {start && <CircleMarker center={[start[1], start[0]]} radius={9} color="#fff" weight={3} fillColor="#2e6f55" fillOpacity={1}><Popup>Walk starts here</Popup></CircleMarker>}
       {destination && <CircleMarker center={[destination[1], destination[0]]} radius={9} color="#fff" weight={3} fillColor="#d47c3e" fillOpacity={1}><Popup>Walk destination</Popup></CircleMarker>}
-      {reportPoint && <CircleMarker center={[reportPoint[1], reportPoint[0]]} radius={8} color="#fff" weight={3} fillColor="#754d9a" fillOpacity={1}><Popup>New report location</Popup></CircleMarker>}
+      {reportPoint && <CircleMarker center={[reportPoint[1], reportPoint[0]]} radius={8} color="#fff" weight={3} fillColor={REPORT_MARKER_COLOR} fillOpacity={1}><Popup>New report location</Popup></CircleMarker>}
       {polyline.length > 1 && <Polyline positions={polyline} color="#2e6f55" weight={6} opacity={0.9} />}
       {reports.map((report) => (
         <CircleMarker key={report.id} center={[report.latitude, report.longitude]} radius={7}
-          color="#fff" weight={2} fillColor={report.severity === "high" ? "#b8503e" : "#d1973d"} fillOpacity={1}>
+          color="#fff" weight={2} fillColor={REPORT_MARKER_COLOR} fillOpacity={1}>
           <Popup><strong>{report.barrier_type.replaceAll("_", " ")}</strong><br />{report.severity} severity<br />{report.description}</Popup>
         </CircleMarker>
       ))}
