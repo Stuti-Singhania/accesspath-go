@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ors_base_url: str = "https://api.heigit.org/openrouteservice"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma3:4b"
+    ollama_text_read_timeout_seconds: float = 180
+    ollama_image_read_timeout_seconds: float = 600
     database_url: str = "sqlite:///../data/accesspath.db"
     frontend_origin: str = "http://localhost:3000"
 

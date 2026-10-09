@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import re
 
 import httpx
@@ -11,6 +12,9 @@ from app.schemas.accessibility import BarrierAnalysis, WalkPreferences
 
 class LocalAIUnavailable(Exception):
     """A local model could not provide a usable, structured response."""
+
+
+logger = logging.getLogger(__name__)
 
 
 _DURATION = re.compile(
@@ -77,11 +81,26 @@ def conservative_preferences(text: str) -> WalkPreferences:
 
 
 async def _ollama(settings: Settings, prompt: str, image: bytes | None = None) -> dict:
-    content: dict = {"model": settings.ollama_model, "prompt": prompt, "stream": False, "format": "json"}
+    content: dict = {
+        "model": settings.ollama_model,
+        "prompt": prompt,
+        "stream": False,
+        "format": BarrierAnalysis.model_json_schema() if image is not None else "json",
+        "keep_alive": "10m",
+        "options": {"num_predict": 256 if image is not None else 320},
+    }
     if image is not None:
         content["images"] = [base64.b64encode(image).decode("ascii")]
+    read_timeout = (
+        settings.ollama_image_read_timeout_seconds
+        if image is not None
+        else settings.ollama_text_read_timeout_seconds
+    )
+    # CPU-only multimodal inference can take several minutes. Keep connect/write/pool
+    # waits bounded while allowing a longer response read for image requests.
+    timeout = httpx.Timeout(read_timeout, connect=10, write=30, pool=10)
     try:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{settings.ollama_base_url.rstrip('/')}/api/generate", json=content)
             response.raise_for_status()
     except httpx.TimeoutException as exc:
@@ -130,13 +149,24 @@ async def extract_preferences(settings: Settings, text: str) -> tuple[WalkPrefer
 
 async def analyze_image(settings: Settings, image: bytes) -> BarrierAnalysis:
     prompt = (
-        "Inspect only visible evidence in this outdoor image. Do not infer hidden barriers. "
-        "Return ONLY JSON with barrier_type (stairs|blocked_ramp|pothole|broken_sidewalk|"
-        "steep_slope|narrow_path|mud|obstruction|inaccessible_entrance|none), severity "
-        "(low|medium|high), concise description, confidence from 0 to 1. If uncertain or no "
-        "barrier is visible, use none with low confidence."
+        "Return exactly one JSON object matching the supplied schema and no other text. "
+        "Classify only barriers directly visible in the image; do not infer hidden conditions "
+        "or invent a barrier. Use barrier_type 'none' and low confidence when the evidence "
+        "is uncertain or no listed barrier is clearly visible. Keep description concise and "
+        "within the schema's 500-character limit."
     )
     try:
         return BarrierAnalysis.model_validate(await _ollama(settings, prompt, image))
     except ValidationError as exc:
-        raise LocalAIUnavailable("Gemma returned an invalid barrier result. No report was created.") from exc
+        diagnostics = [
+            {
+                "field": ".".join(str(part) for part in error["loc"]),
+                "type": error["type"],
+            }
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+        ]
+        logger.warning("Gemma barrier response failed validation: %s", diagnostics)
+        raise LocalAIUnavailable(
+            "Gemma's barrier result did not match the required fields or value ranges. "
+            "No report was created. Try another image."
+        ) from exc

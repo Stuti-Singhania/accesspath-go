@@ -51,8 +51,12 @@ export default function Home() {
   const walkActionRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    api.reports().then(setReports).catch((error: unknown) => {
-      setReportsError(error instanceof Error ? error.message : "Community reports could not be loaded.");
+    api.reports().then((loadedReports) => {
+      setReports(loadedReports);
+      setReportsError("");
+    }).catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : "The report service did not return a response.";
+      setReportsError(`Community reports could not be loaded: ${detail}`);
     }).finally(() => setReportsLoading(false));
   }, []);
 
@@ -114,7 +118,10 @@ export default function Home() {
     if (image.size > 8 * 1024 * 1024) { setMessage("Image must be 8 MB or smaller."); return; }
     setBusy("analysis"); setMessage(""); setAnalysis(null);
     try { setAnalysis(await api.analyze(image)); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Image analysis isn't available right now."); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : "The local model did not return a result.";
+      setMessage(`Barrier image analysis failed: ${detail}`);
+    }
     finally { setBusy(""); }
   };
 

@@ -1,3 +1,4 @@
+import struct
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -18,6 +19,55 @@ from app.services.ai import LocalAIUnavailable, analyze_image, extract_preferenc
 from app.services.routing import RoutingUnavailable, build_routes
 
 router = APIRouter(prefix="/api")
+MAX_IMAGE_PIXELS = 16_000_000
+
+
+def _image_dimensions(contents: bytes, content_type: str) -> tuple[int, int] | None:
+    """Read image dimensions from common format headers without decoding or re-encoding pixels."""
+    if content_type == "image/png" and contents.startswith(b"\x89PNG\r\n\x1a\n") and len(contents) >= 24:
+        return struct.unpack(">II", contents[16:24])
+
+    if content_type == "image/jpeg" and contents.startswith(b"\xff\xd8"):
+        offset = 2
+        while offset + 4 <= len(contents):
+            if contents[offset] != 0xFF:
+                offset += 1
+                continue
+            marker = contents[offset + 1]
+            offset += 2
+            while marker == 0xFF and offset < len(contents):
+                marker = contents[offset]
+                offset += 1
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                continue
+            if offset + 2 > len(contents):
+                break
+            segment_length = int.from_bytes(contents[offset:offset + 2], "big")
+            if segment_length < 2 or offset + segment_length > len(contents):
+                break
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                if segment_length >= 7:
+                    height, width = struct.unpack(">HH", contents[offset + 3:offset + 7])
+                    return width, height
+                break
+            offset += segment_length
+
+    if content_type == "image/webp" and len(contents) >= 30 and contents[:4] == b"RIFF" and contents[8:12] == b"WEBP":
+        chunk, payload = contents[12:16], contents[20:]
+        if chunk == b"VP8X" and len(payload) >= 10:
+            width = int.from_bytes(payload[4:7], "little") + 1
+            height = int.from_bytes(payload[7:10], "little") + 1
+            return width, height
+        if chunk == b"VP8 " and len(payload) >= 10 and payload[3:6] == b"\x9d\x01\x2a":
+            width = int.from_bytes(payload[6:8], "little") & 0x3FFF
+            height = int.from_bytes(payload[8:10], "little") & 0x3FFF
+            return width, height
+        if chunk == b"VP8L" and len(payload) >= 5 and payload[0] == 0x2F:
+            b1, b2, b3, b4 = payload[1:5]
+            width = 1 + b1 + ((b2 & 0x3F) << 8)
+            height = 1 + (b2 >> 6) + (b3 << 2) + ((b4 & 0x0F) << 10)
+            return width, height
+    return None
 
 
 @router.post("/preferences")
@@ -53,6 +103,9 @@ async def barrier_analysis(
         raise HTTPException(status_code=413, detail="Image must be 8 MB or smaller.")
     if not contents:
         raise HTTPException(status_code=400, detail="The selected image is empty.")
+    dimensions = _image_dimensions(contents, image.content_type or "")
+    if dimensions and dimensions[0] * dimensions[1] > MAX_IMAGE_PIXELS:
+        raise HTTPException(status_code=413, detail="Image dimensions must be 16 megapixels or smaller.")
     try:
         return await analyze_image(settings, contents)
     except LocalAIUnavailable as exc:

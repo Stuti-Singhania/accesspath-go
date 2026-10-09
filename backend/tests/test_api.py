@@ -147,6 +147,89 @@ async def test_unavailable_model_falls_back_with_visible_reason(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("image", "expected_read_timeout", "expected_tokens"), [
+    (None, 180, 320), (b"test image bytes", 600, 256),
+])
+async def test_ollama_uses_bounded_phase_timeouts_and_keeps_model_loaded(
+    monkeypatch, image, expected_read_timeout, expected_tokens
+):
+    calls = {}
+
+    class FakeOllamaClient:
+        def __init__(self, *, timeout):
+            calls["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, json):
+            calls["json"] = json
+            return type("Response", (), {
+                "raise_for_status": lambda _self: None,
+                "json": lambda _self: {"response": '{"ok": true}'},
+            })()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeOllamaClient)
+    result = await ai._ollama(Settings(_env_file=None), "prompt", image)
+
+    timeout = calls["timeout"]
+    assert timeout.read == expected_read_timeout
+    assert timeout.connect == 10
+    assert timeout.write == 30
+    assert timeout.pool == 10
+    assert calls["json"]["keep_alive"] == "10m"
+    assert calls["json"]["options"]["num_predict"] == expected_tokens
+    assert ("images" in calls["json"]) is (image is not None)
+    expected_format = BarrierAnalysis.model_json_schema() if image is not None else "json"
+    assert calls["json"]["format"] == expected_format
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_image_inference_timeout_is_an_error_without_fallback(monkeypatch):
+    class TimeoutClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            request = httpx.Request("POST", "http://localhost:11434/api/generate")
+            raise httpx.ReadTimeout("slow multimodal inference", request=request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", TimeoutClient)
+    with pytest.raises(ai.LocalAIUnavailable, match="inference timed out"):
+        await ai.analyze_image(Settings(_env_file=None), b"image bytes")
+
+
+@pytest.mark.asyncio
+async def test_invalid_barrier_response_logs_only_safe_validation_diagnostics(monkeypatch, caplog):
+    async def invalid_response(*_args, **_kwargs):
+        return {
+            "barrier_type": "PRIVATE_MODEL_VALUE",
+            "severity": "high",
+            "description": "A visible barrier.",
+            "confidence": 0.8,
+        }
+
+    monkeypatch.setattr(ai, "_ollama", invalid_response)
+    with pytest.raises(ai.LocalAIUnavailable, match="required fields or value ranges"):
+        await ai.analyze_image(Settings(_env_file=None), b"private image bytes")
+
+    assert "barrier_type" in caplog.text
+    assert "literal_error" in caplog.text
+    assert "PRIVATE_MODEL_VALUE" not in caplog.text
+    assert "private image bytes" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_preference_endpoint_reports_source_without_returning_raw_output(client, monkeypatch):
     async def malformed(*_args, **_kwargs):
         return {"untrusted": "raw output must not be returned", "target_duration_minutes": 25}
@@ -274,6 +357,26 @@ def test_analyze_image_rejects_oversized_files(client):
         "image": ("large.png", b"x" * (8 * 1024 * 1024 + 1), "image/png"),
     })
     assert response.status_code == 413
+
+
+def test_analyze_image_rejects_excessive_dimensions_without_calling_model(client, monkeypatch):
+    import struct
+
+    async def should_not_run(*_args):
+        raise AssertionError("model must not receive oversized images")
+
+    monkeypatch.setattr("app.api.routes.analyze_image", should_not_run)
+    png_header = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + struct.pack(">II", 6000, 3000)
+        + b"\x08\x02\x00\x00\x00"
+    )
+    response = client.post("/api/analyze-barrier", files={
+        "image": ("large-dimensions.png", png_header, "image/png"),
+    })
+    assert response.status_code == 413
+    assert "16 megapixels" in response.json()["detail"]
 
 
 def test_report_creation_retrieval_bbox_and_timezone(client):
