@@ -216,13 +216,24 @@ async def extract_preferences(settings: Settings, text: str) -> tuple[WalkPrefer
 async def analyze_image(settings: Settings, image: bytes) -> BarrierAnalysis:
     prompt = (
         "Return exactly one JSON object matching the supplied schema and no other text. "
-        "Classify only barriers directly visible in the image; do not infer hidden conditions "
-        "or invent a barrier. Use barrier_type 'none' and low confidence when the evidence "
-        "is uncertain or no listed barrier is clearly visible. Keep description concise and "
-        "within the schema's 500-character limit."
+        "Describe only visual features actually present in the uploaded image. Keep direct "
+        "observations separate from interpretations: name what is visible, then say when its "
+        "effect on the walking route is uncertain. For example, a visible stone wall is not "
+        "proof that the route is blocked; classify it as an obstruction only when the image "
+        "clearly shows it blocking the route. A visible steep-looking hillside may be described "
+        "as appearing steep, but do not infer an exact slope. Do not infer access needs, hidden "
+        "conditions, route continuity, or that a route is accessible. Never invent obstruction, "
+        "measurements, dimensions, surface defects, or other details not established visually. "
+        "Use a cautious description and low confidence when evidence or its accessibility "
+        "meaning is ambiguous; use barrier_type 'other' only for a clearly relevant visible "
+        "barrier without a more specific category, and 'none' when no relevant barrier is "
+        "visible. The category and description must agree. Confidence is the model's own "
+        "rough estimate, not a verified probability; do not inflate it. Keep the description "
+        "concise and within the schema's 500-character limit."
     )
     try:
-        return BarrierAnalysis.model_validate(await _ollama(settings, prompt, image))
+        analysis = BarrierAnalysis.model_validate(await _ollama(settings, prompt, image))
+        return _check_barrier_consistency(analysis)
     except ValidationError as exc:
         diagnostics = [
             {
@@ -236,3 +247,57 @@ async def analyze_image(settings: Settings, image: bytes) -> BarrierAnalysis:
             "Gemma's barrier result did not match the required fields or value ranges. "
             "No report was created. Try another image."
         ) from exc
+
+
+def _check_barrier_consistency(analysis: BarrierAnalysis) -> BarrierAnalysis:
+    """Resolve only explicit, multi-part contradictions in validated model output."""
+    description = analysis.description.lower()
+
+    # Require a direct steep-terrain assertion tied to the walking surface. Do not
+    # let hedging about a separate feature (for example, unevenness) cancel it.
+    uncertain_steepness = re.search(
+        r"\b(?:might|may|could|possibly|potentially|appears?)\b[^.!?;\n]{0,35}\bsteep\b"
+        r"|\bsteep[- ]looking\b"
+        r"|\bslope\s+(?:severity|angle|degree)\b[^.!?;\n]{0,50}"
+        r"\b(?:cannot|can't|could not|cannot be)\s+(?:be\s+)?determined\b",
+        description,
+    )
+    uncertain_route_relevance = re.search(
+        r"\b(?:whether|if)\b[^.!?;\n]{0,70}\b(?:affects?|matters?\s+for)\b"
+        r"[^.!?;\n]{0,40}\b(?:walking\s+)?route\b[^.!?;\n]{0,35}"
+        r"\b(?:unclear|uncertain|not\s+clear)\b",
+        description,
+    )
+    describes_relevant_steep_terrain = (
+        re.search(r"\bsteep(?:ly)?\b", description)
+        and re.search(r"\b(?:hillside|slope|trail|path)\b", description)
+        and re.search(r"\b(?:walking\s+route|path|trail)\b", description)
+        and not uncertain_steepness
+        and not uncertain_route_relevance
+    )
+    if analysis.barrier_type == "none" and describes_relevant_steep_terrain:
+        updates = {"barrier_type": "steep_slope"}
+        if analysis.severity == "low":
+            updates["severity"] = "medium"
+        return analysis.model_copy(update=updates)
+
+    describes_wall = re.search(r"\b(?:stone|brick|rock)\s+wall\b", description)
+    uncertain_blockage = re.search(
+        r"\b(?:unclear|uncertain|not\s+clear|cannot\s+tell|cannot\s+determine)\b"
+        r"[^.!?;\n]{0,100}\b(?:block|obstruct|route|path)\b"
+        r"|\b(?:block|obstruct|route|path)\b[^.!?;\n]{0,100}"
+        r"\b(?:unclear|uncertain|not\s+clear|cannot\s+tell|cannot\s+determine)\b",
+        description,
+    )
+    explicitly_no_hole = re.search(
+        r"\b(?:no|without|not\s+showing|does\s+not\s+show)\s+(?:visible\s+)?"
+        r"(?:hole|pothole|cavity)\b",
+        description,
+    )
+    if describes_wall and (
+        (analysis.barrier_type == "obstruction" and uncertain_blockage)
+        or (analysis.barrier_type == "pothole" and explicitly_no_hole)
+    ):
+        return analysis.model_copy(update={"barrier_type": "none", "severity": "low"})
+
+    return analysis

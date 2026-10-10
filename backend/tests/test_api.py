@@ -308,6 +308,70 @@ async def test_invalid_barrier_response_logs_only_safe_validation_diagnostics(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_result", "expected_type"),
+    [
+        ({"barrier_type": "steep_slope", "severity": "high",
+          "description": "A steep grassy hillside with a narrow dirt trail is visible.",
+          "confidence": 0.94}, "steep_slope"),
+        ({"barrier_type": "other", "severity": "low",
+          "description": "A stone wall is visible; whether it blocks the walking route is unclear.",
+          "confidence": 0.31}, "other"),
+        ({"barrier_type": "steep_slope", "severity": "medium",
+          "description": "A steep-looking hillside trail is visible; its slope cannot be measured from this image.",
+          "confidence": 0.58}, "steep_slope"),
+        ({"barrier_type": "none", "severity": "low",
+          "description": "The hillside is steep and the path is narrow and challenging.",
+          "confidence": 0.42}, "steep_slope"),
+        ({"barrier_type": "none", "severity": "low",
+          "description": "A grassy path leads up a steep, green hillside with rocky outcrops. "
+          "Dark clouds fill the sky. The hillside appears uneven and potentially challenging.",
+          "confidence": 0.46}, "steep_slope"),
+        ({"barrier_type": "none", "severity": "low",
+          "description": "A path might be steep, but slope severity cannot be determined from this image.",
+          "confidence": 0.22}, "none"),
+        ({"barrier_type": "none", "severity": "low",
+          "description": "A steep-looking hillside is visible, but whether it affects the walking route is unclear.",
+          "confidence": 0.28}, "none"),
+        ({"barrier_type": "obstruction", "severity": "high",
+          "description": "A stone wall is visible, but whether it blocks the route is unclear.",
+          "confidence": 0.4}, "none"),
+        ({"barrier_type": "pothole", "severity": "high",
+          "description": "A stone wall is visible; no hole is visible.",
+          "confidence": 0.7}, "none"),
+        ({"barrier_type": "none", "severity": "low",
+          "description": "A level, clear paved path with no visible barriers.",
+          "confidence": 0.96}, "none"),
+    ],
+    ids=[
+        "steep-hillside", "ambiguous-wall", "unmeasured-slope",
+        "hillside-none-contradiction", "exact-hillside-output", "uncertain-slope-severity",
+        "hedged-hillside", "uncertain-wall-obstruction", "wall-not-pothole", "barrier-free",
+    ],
+)
+async def test_image_analysis_grounding_regressions(monkeypatch, model_result, expected_type):
+    calls = {}
+
+    async def mocked_model(_settings, prompt, image):
+        calls.update(prompt=prompt, image=image)
+        return model_result
+
+    monkeypatch.setattr(ai, "_ollama", mocked_model)
+    result = await ai.analyze_image(Settings(_env_file=None), b"mock image")
+
+    assert result.barrier_type == expected_type
+    assert calls["image"] == b"mock image"
+    assert "observations separate from interpretations" in calls["prompt"]
+    assert "Never invent obstruction, measurements, dimensions" in calls["prompt"]
+    assert "not a verified probability" in calls["prompt"]
+    assert result.confidence == model_result["confidence"]
+    if expected_type == "steep_slope" and model_result["barrier_type"] == "none":
+        assert result.severity == "medium"
+    if expected_type == "none" and model_result["barrier_type"] in {"obstruction", "pothole"}:
+        assert result.severity == "low"
+
+
+@pytest.mark.asyncio
 async def test_preference_endpoint_reports_source_without_returning_raw_output(client, monkeypatch):
     async def malformed(*_args, **_kwargs):
         return {"untrusted": "raw output must not be returned", "target_duration_minutes": 25}
@@ -404,6 +468,10 @@ def test_barrier_response_validation_and_malformed_model_result(monkeypatch):
     with pytest.raises(ValidationError):
         BarrierAnalysis.model_validate({"barrier_type": "maybe", "severity": "high",
             "description": "unknown", "confidence": 1.4})
+
+    schema = BarrierAnalysis.model_json_schema()
+    assert set(schema["properties"]) == {"barrier_type", "severity", "description", "confidence"}
+    assert "not a verified probability" in schema["properties"]["confidence"]["description"]
 
 
 def test_analyze_image_endpoint_validates_and_handles_model_errors(client, monkeypatch):
