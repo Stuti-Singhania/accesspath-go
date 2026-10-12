@@ -33,7 +33,7 @@ The shortest walking route is not necessarily the most suitable route. Common ro
 
 ## Demo
 
-The [`demo/README.md`](demo/README.md) contains a Windows startup checklist and a walkthrough for demonstrating the current app. The repository does not currently include screenshots or a recorded video.
+Watch the [AccessPath Go Demo (4 min 14 sec)](https://youtu.be/bhiKlUT-12c). The [`demo/README.md`](demo/README.md) contains a Windows startup checklist and walkthrough.
 
 ## Architecture
 
