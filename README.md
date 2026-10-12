@@ -1,159 +1,155 @@
 # AccessPath Go
 
-An accessibility-aware outdoor route companion for people with mobility challenges, including wheelchair users and people who use walkers or canes. Describe the walk you want, choose its start and destination, compare a walking route using available community reports, then put your phone away. You can also submit a photo of an outdoor barrier for local AI analysis and confirm it before sharing.
+**Go farther. Look at your phone less.**
 
-AccessPath Go is an early MVP. Route distance and duration come from OpenRouteService (ORS). Known barrier reports are matched to the route and scored with fixed rules. Stairs, slope and surface are explicitly **unknown** because the current routing response does not establish those properties. A route score is a comparison aid, not an accessibility or safety guarantee.
+AccessPath Go is an early-stage outdoor route companion for people who want to plan around mobility needs. Describe the walk that works for you, review route options and known community reports, then switch to **Touch Grass** mode and put your phone away.
 
-## Core features
+## Contents
 
-- Natural-language request parsing with a local Gemma model, Pydantic validation and deterministic wheelchair defaults.
-- OpenRouteService pedestrian alternatives, deterministically ranked by duration fit and nearby confirmed community reports.
-- Leaflet map with route line, selected start/destination, and saved barrier report markers.
-- Local multimodal Gemma analysis of a user-selected photo. A person reviews the finding and explicitly confirms before a report is stored.
-- Minimal Touch Grass view with the selected route endpoints, distance, estimated time and known report count.
+- [Why AccessPath Go?](#why-accesspath-go)
+- [Features](#features)
+- [Demo](#demo)
+- [Architecture](#architecture)
+- [Technology](#technology)
+- [Run locally on Windows](#run-locally-on-windows)
+- [API](#api)
+- [Tests and quality checks](#tests-and-quality-checks)
+- [Privacy and limitations](#privacy-and-limitations)
+- [Contributing and license](#contributing-and-license)
 
-## Why Touch Grass?
+## Why AccessPath Go?
 
-The app is designed to make screen time the shortest part of going out: describe needs, choose two points, glance at a concise route summary and start the walk. The walk view removes the planning interface and encourages the user to put the phone away. There is no feed, account, tracking, or in-walk screen interaction.
+The shortest walking route is not necessarily the most suitable route. Common routing data can provide a path, distance and estimated duration without establishing whether a route has stairs, steep slopes, rough surfaces or other access barriers. AccessPath Go makes those unknowns visible, lets people review mobility preferences and community reports, and avoids presenting a route score as proof of accessibility.
+
+## Features
+
+- Describe mobility needs in natural language and review or adjust the extracted preferences.
+- Parse preferences with local Gemma through Ollama, with a deterministic fallback when text inference is unavailable.
+- Request pedestrian route alternatives from OpenRouteService (ORS).
+- Rank alternatives with a deterministic score based on target-duration fit and nearby community reports.
+- Explore start, destination, route and report locations on an interactive Leaflet map. Keyboard coordinate entry is available alongside map clicks and browser geolocation.
+- Analyze a barrier photo with Gemma, inspect the suggested category, severity, description and confidence, then confirm before sharing a report.
+- View saved community reports and enter Touch Grass mode for a compact route summary.
+
+## Demo
+
+The [`demo/README.md`](demo/README.md) contains a Windows startup checklist and a walkthrough for demonstrating the current app. The repository does not currently include screenshots or a recorded video.
 
 ## Architecture
 
-```text
-frontend/                         Next.js, React, TypeScript, Tailwind, Leaflet
-  src/app/                        Accessible planning flow and Touch Grass view
-  src/components/RouteMap.tsx     Client-only Leaflet map
-backend/                          FastAPI, Pydantic, SQLModel, SQLite
-  app/api/                         Preferences, routing, image analysis, reports
-  app/models/                      SQLite report model
-  app/schemas/                     Strict request/response validation
-  app/services/                    Ollama, ORS, deterministic scoring
-  tests/                           Mocked-service unit/API tests
-data/                              Local SQLite file, created at startup
-demo/                              Quick walkthrough
+```mermaid
+flowchart LR
+    Browser[Next.js frontend<br/>React, TypeScript, Leaflet] -->|HTTP API| API[FastAPI backend]
+    API -->|Text and image inference| Ollama[Local Ollama<br/>Gemma]
+    API -->|Walking route alternatives| ORS[OpenRouteService]
+    API -->|Confirmed reports| SQLite[(SQLite database)]
+    API -->|Route and report data| Browser
 ```
 
-The browser sends preference text, coordinates and uploaded images to the local FastAPI service. That service sends inference requests to the configured local Ollama endpoint, asks ORS for pedestrian route alternatives, scores only returned duration and confirmed nearby reports, and stores user-confirmed reports in SQLite. Route decisions never come from an LLM.
-
-## Local AI and open innovation
-
-Gemma through Ollama turns a natural-language request into a strict `WalkPreferences` object. If Ollama is down for that endpoint, conservative keyword rules give the user a visibly labeled fallback. Barrier photos require a successful Ollama vision response; if the model is unavailable or returns invalid data, the endpoint reports an error rather than inventing a result. Pydantic validates both kinds of model output. Uploaded photos are not saved by the application.
-
-Open-weight local inference lets people inspect and run the model without sending sensitive location context or outdoor photos to a hosted AI provider. OpenStreetMap-derived routing and community barrier reports let people inspect and improve the underlying map information. Routing still requires a network connection and an ORS key; this application does not claim to work offline.
+The backend validates model responses and route data. Route scoring is deterministic; an LLM does not choose or score routes.
 
 ## Technology
 
-- Frontend: Next.js, React, TypeScript, Tailwind CSS, Leaflet and React Leaflet
-- Backend: Python, FastAPI, Pydantic, SQLModel and SQLite
-- AI: Gemma through the local Ollama HTTP API (text and multimodal image input)
-- Routing and map data: HeiGIT OpenRouteService and OpenStreetMap
+| Area | Technologies |
+| --- | --- |
+| Frontend | Next.js 15, React 19, TypeScript, Tailwind CSS, Leaflet, React Leaflet |
+| Backend | Python 3.11+, FastAPI, Pydantic, Pydantic Settings, SQLModel, HTTPX |
+| Local inference | Ollama with Gemma (default model: `gemma3:4b`) |
+| Routing and map data | OpenRouteService walking API, OpenStreetMap tiles |
+| Persistence | SQLite |
 
-## Requirements
+## Run locally on Windows
+
+### Prerequisites
 
 - Python 3.11 or later
 - Node.js 20 or later and npm
-- An [OpenRouteService API key](https://openrouteservice.org/dev/#/signup)
-- [Ollama](https://ollama.com/) and a vision-capable Gemma model (for example `gemma3:4b`) for local AI features
+- [Ollama](https://ollama.com/) for local AI features
+- An [OpenRouteService API key](https://openrouteservice.org/dev/#/signup) for route requests
 
-## Backend setup
+### Configure the backend
 
-From the repository root, copy `.env.example` to `.env` and set your ORS key. The backend loads that root file when started from `backend/`; it also accepts a `backend/.env` for a backend-only setup. Keep both local files out of Git.
+From the repository root, copy the provided environment file and add your ORS key:
 
 ```powershell
-cd backend
+Copy-Item .env.example .env
+notepad .env
+```
+
+Set `ORS_API_KEY` in `.env`. The file documents the current settings and defaults for `ORS_BASE_URL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `DATABASE_URL`, and `FRONTEND_ORIGIN`. The backend also accepts `OLLAMA_TEXT_READ_TIMEOUT_SECONDS` (180 seconds by default) and `OLLAMA_IMAGE_READ_TIMEOUT_SECONDS` (600 seconds by default). Keep `.env` private and out of commits. The backend reads the root `.env` when launched from `backend/`.
+
+In a PowerShell terminal:
+
+```powershell
+Set-Location backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-The API starts at http://127.0.0.1:8000 and interactive docs are at http://127.0.0.1:8000/docs. SQLite tables and the `data/` directory are created automatically on startup. `ORS_API_KEY` is read by the backend only and is never returned by `/health`.
+The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
-## Ollama setup
+### Configure Ollama and Gemma
 
-Install and start Ollama, then pull a multimodal Gemma model:
+Install and start Ollama. Pull the configured vision-capable model:
 
-```sh
+```powershell
 ollama pull gemma3:4b
 ```
 
-Set `OLLAMA_MODEL` in root `.env` (or `backend/.env`) to the exact model tag shown by `ollama list`. The default Ollama endpoint is `http://localhost:11434`. The health response reports only whether a model endpoint is configured; it does not claim that Ollama is running or that inference succeeded.
+The default `OLLAMA_BASE_URL` is `http://localhost:11434`, and `OLLAMA_MODEL` defaults to `gemma3:4b`. Change those names in the root `.env` if you use a different endpoint or model tag. If Ollama is not already running as a service, start it in a separate terminal with `ollama serve`.
 
-## Frontend setup
+### Start the frontend
 
-In another terminal:
+In another PowerShell terminal:
 
 ```powershell
-cd frontend
+Set-Location frontend
 npm.cmd install
 npm.cmd run dev
 ```
 
-Open http://localhost:3000. Copy `frontend/.env.example` to `frontend/.env.local` to change `NEXT_PUBLIC_API_URL` (default `http://127.0.0.1:8000`). Leaflet CSS is imported in the root layout and the map component is client-only to avoid server-side rendering browser map APIs.
-
-The map supports clicks, browser geolocation, and keyboard-accessible latitude/longitude entry. Coordinates use `[longitude, latitude]` when sent to the backend. Browser geolocation needs permission; manual map/coordinate entry remains available if permission is denied.
-
-## Demo flow
-
-1. Keep the example request or write a mobility request. The preferences panel shows the validated fields and whether Gemma or the fallback parsed them.
-2. Use **Use my location** or click the map to set a start. Select **Destination** and click the map again.
-3. Choose **Find my route**. The recommended ORS alternative is drawn on the map; known community barriers are marked and included in its deterministic score.
-4. Review the distance, ORS duration, low-is-better score, report count and explicit unknowns before opening Touch Grass mode.
-5. In the barrier report section, choose an image, set its location on the map, analyze it locally, inspect the structured result and select **Confirm & share report** to save it.
-
-The OpenStreetMap base layer and ORS require network access. Geolocation requires browser permission and a secure context (localhost is allowed). You can select both route points manually instead.
+Open `http://localhost:3000`. The frontend API URL defaults to `http://127.0.0.1:8000`; set `NEXT_PUBLIC_API_URL` if your backend uses another address. `npm.cmd` avoids PowerShell execution-policy issues with the `npm.ps1` shim.
 
 ## API
 
 | Method | Endpoint | Behavior |
 | --- | --- | --- |
-| GET | `/health` | Basic health plus `ollama_configured`; no secrets or connectivity claims |
-| POST | `/api/preferences` | Local Gemma preference extraction, validated with Pydantic, safe fallback when unavailable |
-| POST | `/api/routes` | ORS walking alternatives, deterministic score and GeoJSON line geometry |
-| POST | `/api/analyze-barrier` | Local multimodal Gemma; validated classification or clear 503 error |
-| POST | `/api/reports` | Validate and persist a user-confirmed report |
-| GET | `/api/reports` | List reports; optional `min_lon`, `min_lat`, `max_lon`, `max_lat` filter |
+| `GET` | `/health` | Returns API status and whether an Ollama endpoint/model is configured; it does not check inference availability. |
+| `POST` | `/api/preferences` | Parses natural-language preferences with Ollama or uses the local fallback; returns preferences and explicit/suggested field metadata. |
+| `POST` | `/api/routes` | Requests walking alternatives from ORS and returns route geometry, distance, duration, score, known nearby reports and accessibility notes. |
+| `POST` | `/api/analyze-barrier` | Analyzes a JPEG, PNG or WebP upload (maximum 8 MB and 16 megapixels); returns validated barrier analysis or an error. |
+| `POST` | `/api/reports` | Validates and stores a user-confirmed report in SQLite. |
+| `GET` | `/api/reports` | Lists reports; optional bounding-box filtering uses `min_lon`, `min_lat`, `max_lon` and `max_lat` together. |
 
-Route coordinates are `[longitude, latitude]`. Report coordinates are named latitude/longitude. Barrier penalties only use reports within approximately 30 metres of the returned route geometry. Duration deviation uses a fixed coefficient and the requested target. Lower scores rank ahead of higher scores; the score is not a probability or a measure of safety.
+Coordinates for routes are `[longitude, latitude]`. Reports use separate `latitude` and `longitude` fields. The route score is lower-is-better: it combines target-duration deviation with severity penalties for non-`none` reports within about 30 metres of the route geometry. Current routing data does not establish stairs, slope or surface conditions, and those remain unknown.
 
-## Tests and build
+## Tests and quality checks
 
-From `backend/`:
-
-```sh
-pytest -q
-```
-
-The suite mocks both Ollama and ORS and needs no external keys or running services. From `frontend/`:
-
-```sh
-npm.cmd run build
-```
-
-Run these from their respective folders in PowerShell:
+Run from the `backend/` directory after installing the development dependencies:
 
 ```powershell
-# backend
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\ruff.exe check app tests
+.\.venv\Scripts\python.exe -m ruff check app tests
+```
 
-# frontend
+Build the frontend from `frontend/`:
+
+```powershell
 npm.cmd run build
 ```
 
-## Privacy and stored data
+## Privacy and limitations
 
-Preference text and images go from the browser to the configured local FastAPI/Ollama service; images are analyzed in memory and are not retained by this app. Start/destination coordinates are sent to the backend for ORS route requests. User-confirmed reports persist in local SQLite with latitude, longitude, barrier category, severity, description, confidence and UTC creation time. The application has no login, ad tracking, continuous location tracking or social feed. Protect the local database because reports can reveal places someone visits.
+- Preference and photo inference use the configured Ollama endpoint. By default it is local; changing `OLLAMA_BASE_URL` can direct prompts or photos to another host.
+- Barrier images are checked and analyzed in memory and are not stored by the application. A finding is not saved as a community report until the user confirms it.
+- Confirmed reports persist in the configured SQLite database with their coordinates, category, severity, description, confidence and creation time. The default database file is `data/accesspath.db` and is created when the backend starts. The app has no account system or report moderation workflow; reports may be inaccurate, misplaced or outdated.
+- Route requests require internet access and a valid ORS key. Map tiles also load from OpenStreetMap over the network. Local Ollama inference does not make the application fully offline.
+- The route score is a comparison aid based only on duration fit and nearby reports. It is not an accessibility, safety or route-condition guarantee. An absence of reports does not mean a route is barrier-free.
+- The project does not provide turn-by-turn navigation or continuous location tracking.
 
 ## Contributing and license
 
-Focused contributions are welcome: open an issue for a bug or accessibility concern, then submit a small pull request with tests for backend behavior. Keep route claims evidence-based and do not add real keys, personal photos or private location data to commits. Run the backend test/lint commands and frontend build before submitting.
+Bug reports, accessibility feedback and focused pull requests are welcome. Please keep claims grounded in the data the app actually has, avoid committing API keys or identifying location/photo data, and run the backend checks and frontend build before opening a pull request.
 
-There is currently no `LICENSE` file in this workspace. A license should be selected and added before the project is presented as reusable open-source software.
-
-## Known limitations
-
-- Route distance/duration need ORS and network access. Missing `ORS_API_KEY`, rejected credentials, rate limits and empty routes produce actionable errors; the app does not fabricate a route.
-- The score uses duration deviation and confirmed, nearby community barrier reports. The current version does not claim ORS route geometry proves stairs, slope, curb, ramp or surface accessibility; those remain unknown.
-- Community reports are user-submitted and may be stale, misplaced or incorrect. An empty map does not mean a route is barrier-free.
-- Preference extraction has a local fallback. Barrier analysis requires Ollama with a vision-capable model and fails clearly when it cannot run.
-- Image uploads are size/type checked and analyzed in memory; there is no account system, location tracking, image storage or moderation workflow in this MVP.
-- The app does not provide turn-by-turn navigation or guarantee a safe or accessible walk.
+This project is licensed under the [MIT License](LICENSE).
